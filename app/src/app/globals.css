@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light dark; }
+
+html, body { background: #F7F8FC; color: #111827; }
+.dark html, .dark body, html.dark, html.dark body { background: #0B0F1A; color: #E5E7EB; }
+
+/* §59 — visible focus everywhere, never removed */
+:focus-visible {
+  outline: 2px solid #6D5EF7;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@layer components {
+  .card        { @apply bg-canvas-raised dark:bg-night-raised border border-canvas-edge dark:border-night-edge rounded-xl; }
+  .card-header { @apply px-5 py-4 border-b border-canvas-edge dark:border-night-edge font-semibold text-ink dark:text-night-text; }
+  .card-body   { @apply p-5; }
+
+  .btn         { @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed; }
+  .btn-primary { @apply btn bg-brand-500 text-white hover:bg-brand-600; }
+  .btn-ghost   { @apply btn bg-transparent border border-canvas-edge dark:border-night-edge text-ink dark:text-night-text hover:bg-canvas-sunken dark:hover:bg-night-sunken; }
+  .btn-danger  { @apply btn bg-bad text-white hover:opacity-90; }
+
+  /* §59 — status is never communicated by colour alone; each chip
+     carries a glyph as well as a hue. */
+  .chip        { @apply inline-flex items-center gap-1.5 px-2 py-1 text-[11px] font-medium rounded-md border; }
+
+  .label       { @apply text-[11px] font-medium text-ink-muted dark:text-night-muted uppercase tracking-wide; }
+  .value       { @apply font-mono text-sm text-ink dark:text-night-text; }
+
+  .input       { @apply w-full px-3 py-2 rounded-lg border border-canvas-edge dark:border-night-edge bg-canvas-raised dark:bg-night-sunken text-sm text-ink dark:text-night-text placeholder:text-ink-subtle focus:outline-none focus:ring-2 focus:ring-brand-400; }
+  .textarea    { @apply input min-h-[96px]; }
+
+  .link        { @apply text-brand-600 dark:text-brand-300 underline underline-offset-4 hover:text-brand-700; }
+
+  /* wide content scrolls in its own container; the page never does */
+  .scroll-x    { @apply overflow-x-auto; }
+}
+
+/* §58 — respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,28 @@
+# gltest — direct suite and live integration suite.
+#
+# The direct suite runs with zero setup: `pytest tests/direct/` needs no
+# network, no keys and no .env.
+#
+# The live suite needs funded accounts. They are NOT listed here, because
+# gltest interpolates `${VAR}` eagerly — a placeholder for a live network
+# would break the offline suite for anyone who has not set the variables.
+# To run against StudioNet, copy .env.example to .env (gitignored), fill
+# in the two keys, and add this block under `studionet:`
+#
+#     accounts:
+#       - "${VERITY_REQUESTER_KEY}"
+#       - "${VERITY_AGENT_KEY}"
+#
+# See DEVELOPMENT.md.
+networks:
+  default: localnet
+
+  localnet:
+    url: "http://127.0.0.1:4000/api"
+
+  studionet: {}
+
+paths:
+  contracts: "contracts"
+
+environment: .env

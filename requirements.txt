@@ -1,0 +1,6 @@
+# Contract tooling. Pinned to the versions this repository was built and
+# tested against; newer releases have changed the direct-mode API before.
+genlayer-test==0.29.2
+genvm-linter==0.11.0
+genlayer-py==0.16.3
+pytest==9.1.1
