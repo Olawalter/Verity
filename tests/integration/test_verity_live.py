@@ -11,8 +11,9 @@ validators each retrieve the evidence themselves, each run the prompt,
 and each compare decision fingerprints. A round that lands is evidence
 that the equivalence rule holds on inputs nobody staged.
 
-Every deployment here is disposable. The canonical one is recorded in
-README.md; these tests must never touch it.
+Every deployment here is disposable — `conftest.py` deploys a fresh one
+per module and binds it to the schema the chain reports. The canonical
+deployment is recorded in README.md; these tests must never touch it.
 
 Environment differences are real and are handled rather than assumed:
 localnet has no fee simulation, StudioNet does; a public RPC drops
@@ -26,12 +27,11 @@ wording fails for a reason unrelated to correctness.
 """
 import json
 import os
-import time
 
 import pytest
 
-from gltest import get_contract_factory, get_default_account, create_accounts
-from gltest.assertions import tx_execution_succeeded
+from gltest import get_accounts, get_default_account
+from .conftest import must_fail, must_succeed, read as _read
 
 GEN = 10 ** 18
 PAYMENT = 2 * GEN           # small: these are real balances on a shared net
@@ -53,6 +53,13 @@ GOOD_URL = (
 # Deliberately unresolvable: proves unavailable != verified.
 DEAD_URL = "https://verity-evidence-does-not-exist.invalid/ci-run-9931.json"
 
+# A claimed hash is required on every receipt — a receipt that claims
+# nothing about its source is not a receipt. The contract never compares
+# it against retrieved bytes, and these tests never assert that it
+# matches: what establishes anything is the panel's own retrieval. The
+# value below is exactly what the field is named for, a CLAIM.
+CLAIMED_HASH = "sha256:" + "5f" * 32
+
 REQUIREMENTS = [
     {"id": "R1", "description": "The linked document exists and is readable",
      "type": "EVIDENCE", "weight": 60, "critical": True,
@@ -66,41 +73,23 @@ REQUIREMENTS = [
 REQUIREMENTS_JSON = json.dumps(REQUIREMENTS)
 
 
-def _read(contract, view, args):
-    value = getattr(contract, view)(args=args).call()
-    return json.loads(value) if isinstance(value, str) else value
-
-
-def _deploy():
-    """A fresh disposable Verity.
-
-    The submission is retried across transient transport failures to the
-    public RPC. A retry can at worst leave an extra disposable instance
-    behind; it can never duplicate a state change on the one under test,
-    because the retry happens before any state exists.
-    """
-    factory = get_contract_factory("Verity")
-    last = None
-    for attempt in range(4):
-        try:
-            return factory.deploy(args=[], consensus_max_rotations=3)
-        except Exception as err:      # noqa: BLE001 — transport errors vary
-            last = err
-            print(f"deploy attempt {attempt + 1} failed: {str(err)[:160]}")
-            time.sleep(20)
-    raise last
-
-
-@pytest.fixture(scope="module")
-def contract():
-    return _deploy()
-
-
 @pytest.fixture(scope="module")
 def agent():
-    """A second wallet, so requester and agent are genuinely different
-    accounts and the authorisation guards are actually exercised."""
-    return create_accounts(1)[0]
+    """The second CONFIGURED wallet.
+
+    A freshly generated account would be a different address but an
+    unfunded one, and every agent-side call here — accept, submit
+    evidence, submit the deliverable — is a transaction that has to pay
+    for itself. The second configured key is a real, funded wallet, so
+    requester and agent are genuinely distinct and the authorisation
+    guards are actually exercised rather than skipped.
+    """
+    accounts = get_accounts()
+    if len(accounts) < 2:
+        pytest.skip(
+            "the live suite needs two configured accounts — see "
+            ".env.example and DEVELOPMENT.md")
+    return accounts[1]
 
 
 def _create_and_fund(contract, agent_addr, job_id_hint="live"):
@@ -118,7 +107,7 @@ def _create_and_fund(contract, agent_addr, job_id_hint="live"):
         "FULL", "PROPORTIONAL", "REFUND", "HUMAN_REVIEW", "FAIL_JOB",
         AGENT_BOND, DISPUTE_BOND,
     ]).transact()
-    assert tx_execution_succeeded(receipt)
+    must_succeed(receipt, "create_job")
 
     page = _read(contract, "list_jobs", [0, 100])
     rows = [r for r in page["rows"] if r["title"].endswith(f"({job_id_hint})")]
@@ -126,7 +115,7 @@ def _create_and_fund(contract, agent_addr, job_id_hint="live"):
     job_id = rows[-1]["job_id"]
 
     receipt = contract.fund_job(args=[job_id]).transact(value=PAYMENT)
-    assert tx_execution_succeeded(receipt)
+    must_succeed(receipt, "fund_job")
 
     job = _read(contract, "get_job", [job_id])
     assert job["status"] == "FUNDED"
@@ -170,8 +159,13 @@ def test_funding_locks_terms_and_records_real_custody(contract, agent):
         job_id, "Rewritten after funding", "New description",
         REQUIREMENTS_JSON, "New evidence rules",
     ]).transact()
-    assert not tx_execution_succeeded(failed), \
-        "terms must not be editable once escrow is held"
+    reason = must_fail(failed, "update_draft after funding")
+    # Assert on the RULE that refused it, not merely that something did.
+    # A test satisfied by any failure passes when the call fails for an
+    # unrelated reason — a bad argument, an out-of-gas — and quietly
+    # stops testing immutability at all.
+    assert "illegal transition from FUNDED" in reason, \
+        f"refused, but for an unexpected reason: {reason}"
 
     job = _read(contract, "get_job", [job_id])
     assert job["status"] == "FUNDED"
@@ -184,7 +178,7 @@ def test_cancel_returns_escrow_before_acceptance(contract, agent):
     job_id = _create_and_fund(contract, agent.address, "cancel")
 
     receipt = contract.cancel_job(args=[job_id]).transact()
-    assert tx_execution_succeeded(receipt)
+    must_succeed(receipt, "cancel_job")
 
     job = _read(contract, "get_job", [job_id])
     assert job["status"] == "CANCELLED"
@@ -209,47 +203,50 @@ def test_live_panel_reaches_consensus_on_retrievable_evidence(contract, agent):
     job_id = _create_and_fund(contract, agent.address, "panel")
 
     agent_contract = contract.connect(agent)
-    assert tx_execution_succeeded(
-        agent_contract.accept_job(args=[job_id, "sha256:live-plan"]).transact())
+    must_succeed(
+        agent_contract.accept_job(args=[job_id, "sha256:live-plan"]).transact(),
+        "accept_job")
 
     for rid in ("R1", "R2"):
-        assert tx_execution_succeeded(agent_contract.submit_evidence(args=[
+        must_succeed(agent_contract.submit_evidence(args=[
             job_id, rid, GOOD_URL,
-            "",                       # claimed_content_hash — a CLAIM, unverified
+            CLAIMED_HASH,             # a CLAIM; the contract verifies nothing
             "text/markdown",
             "raw.githubusercontent.com",
             "genlayerlabs",
             "DELIVERABLE",
             "UNKNOWN",                # independence is judged, not declared
             "Published project document.",
-        ]).transact())
+        ]).transact(), f"submit_evidence({rid})")
 
-    assert tx_execution_succeeded(agent_contract.submit_deliverable(args=[
-        job_id, GOOD_URL, "",
-    ]).transact())
+    must_succeed(agent_contract.submit_deliverable(args=[
+        job_id, GOOD_URL, CLAIMED_HASH,   # uri and hash are both required
+    ]).transact(), "submit_deliverable")
 
-    assert tx_execution_succeeded(contract.open_dispute(args=[
+    must_succeed(contract.open_dispute(args=[
         job_id, json.dumps(["R2"]),
         "The document does not describe a software project.", "[]",
-    ]).transact(value=DISPUTE_BOND))
+    ]).transact(value=DISPUTE_BOND), "open_dispute")
 
     freeze = contract.freeze_evidence(args=[job_id]).transact()
-    assert tx_execution_succeeded(freeze)
+    must_succeed(freeze, "freeze_evidence")
     job = _read(contract, "get_job", [job_id])
     assert job["status"] == "EVIDENCE_FROZEN"
     assert job["evidence_snapshot_hash"], "the frozen set must be hashed"
 
     # No further evidence is admissible once the record is closed.
-    assert not tx_execution_succeeded(agent_contract.submit_evidence(args=[
-        job_id, "R1", GOOD_URL, "", "text/markdown",
+    reason = must_fail(agent_contract.submit_evidence(args=[
+        job_id, "R1", GOOD_URL, CLAIMED_HASH, "text/markdown",
         "raw.githubusercontent.com", "genlayerlabs", "SUPPORTING",
         "UNKNOWN", "Filed after the freeze.",
-    ]).transact())
+    ]).transact(), "submit_evidence after freeze")
+    assert "EVIDENCE_FROZEN" in reason or "frozen" in reason, \
+        f"refused, but for an unexpected reason: {reason}"
 
     receipt = contract.adjudicate(args=[job_id]).transact(**ROUND_WAIT)
-    assert tx_execution_succeeded(receipt), (
-        "a failed round here is usually consensus failure, which means a "
-        "consensus-critical field is not mechanically derivable")
+    must_succeed(receipt, (
+        "adjudicate — a failure here is usually consensus failure, which "
+        "means a consensus-critical field is not mechanically derivable"))
 
     job = _read(contract, "get_job", [job_id])
     assert job["status"] == "VERDICT"
@@ -287,35 +284,39 @@ def test_unreachable_evidence_does_not_pass(contract, agent):
     job_id = _create_and_fund(contract, agent.address, "dead")
 
     agent_contract = contract.connect(agent)
-    assert tx_execution_succeeded(
-        agent_contract.accept_job(args=[job_id, ""]).transact())
+    must_succeed(agent_contract.accept_job(args=[job_id, ""]).transact(),
+                 "accept_job")
     for rid in ("R1", "R2"):
-        assert tx_execution_succeeded(agent_contract.submit_evidence(args=[
+        must_succeed(agent_contract.submit_evidence(args=[
             job_id, rid, DEAD_URL,
-            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            CLAIMED_HASH,             # confidently asserted, never checkable
             "application/json",
             "verity-evidence-does-not-exist.invalid",
             "ci-provider",
             "DELIVERABLE",
             "INDEPENDENT",            # a claim the panel is asked to test
             "CI run proving the work.",
-        ]).transact())
-    assert tx_execution_succeeded(agent_contract.submit_deliverable(args=[
-        job_id, DEAD_URL, "",
-    ]).transact())
+        ]).transact(), f"submit_evidence({rid})")
+    must_succeed(agent_contract.submit_deliverable(args=[
+        job_id, DEAD_URL, CLAIMED_HASH,
+    ]).transact(), "submit_deliverable")
 
-    assert tx_execution_succeeded(contract.open_dispute(args=[
+    must_succeed(contract.open_dispute(args=[
         job_id, json.dumps(["R1", "R2"]),
         "Nothing the agent linked can be opened.", "[]",
-    ]).transact(value=DISPUTE_BOND))
-    assert tx_execution_succeeded(
-        contract.freeze_evidence(args=[job_id]).transact())
+    ]).transact(value=DISPUTE_BOND), "open_dispute")
+    must_succeed(contract.freeze_evidence(args=[job_id]).transact(),
+                 "freeze_evidence")
 
     receipt = contract.adjudicate(args=[job_id]).transact(**ROUND_WAIT)
-    assert tx_execution_succeeded(receipt)
+    must_succeed(receipt, "adjudicate")
 
     job = _read(contract, "get_job", [job_id])
-    v = _read(contract, "get_verdict", [job_id, int(job["latest_verdict_id"])])
+    verdict_id = int(job["latest_verdict_id"])
+    assert verdict_id > 0, (
+        f"adjudicate was accepted but stored no verdict — job status "
+        f"{job['status']}, tick {job['current_tick']}")
+    v = _read(contract, "get_verdict", [job_id, verdict_id])
 
     # The requirement that depended on the dead link must not PASS. It may
     # be UNVERIFIABLE or FAIL — both are honest readings of a source that

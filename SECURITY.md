@@ -205,9 +205,11 @@ Stated plainly, because an unstated assumption reads as a guarantee.
 6. **Direct tests exercise the leader path.** `mock_llm` answers leader
    and validators identically, so agreement itself cannot be staged
    offline. What the direct suite proves is every property the
-   fingerprint rests on; real agreement between independent nodes is the
-   integration suite's job, and that suite has not yet been run against a
-   live panel.
+   fingerprint rests on. Real agreement between independent nodes is the
+   integration suite's job, and it has been run: two full rounds reached
+   consensus on StudioNet, one on retrievable evidence and one on a
+   source that could not be reached. Settlement itself is still covered
+   only by the direct suite.
 
 ## 9. Frontend security
 

@@ -85,6 +85,9 @@ integration suite's job.
 
 ### Integration suite — a live network
 
+**Status: 5 passed against StudioNet, real panel, 6m32s.** Two of the
+five drive a full adjudication round through real consensus.
+
 Needs two funded StudioNet accounts, so requester and agent are
 genuinely different wallets:
 
@@ -111,6 +114,9 @@ gltest tests/integration -v -s --network studionet
 VERITY_SKIP_PANEL=1 gltest tests/integration -v -s --network studionet
 ```
 
+On Windows, prepend `$env:PYTHONUTF8 = "1"` — the config loader reads
+files with the system codec.
+
 Two of these tests drive a real panel: leader and validators each fetch
 the evidence, each run the prompt, each compare fingerprints. Expect
 minutes per round, and set `VERITY_SKIP_PANEL=1` to run only the fast
@@ -121,10 +127,32 @@ simulation, StudioNet does — so nothing in the suite assumes a capability
 the selected network may not have. Each test deploys its own disposable
 contract and never touches the deployment named in the README.
 
-**Status: written and API-checked against `genlayer-test` 0.29.2, but
-not yet executed end to end against a live panel.** Running it needs
-funded keys this repository does not carry. The README says the same
-thing rather than implying coverage that has not been demonstrated.
+#### Three things that will bite you
+
+**`ContractFactory.deploy()` cannot bind this contract on a hosted
+network.** It derives the ABI from `get_contract_schema_for_code`, which
+`genlayer_py` refuses outright off localnet, and which hexes the source
+with `eth_utils.encode_hex` — ASCII only, so the `§` and `—` in the
+contract's comments raise `UnicodeEncodeError` before the call leaves the
+machine. `conftest.py` therefore sends the deploy, then fetches the
+schema the CHAIN reports with `gen_getContractSchema`, then builds the
+contract from that. Stripping characters out of the source to satisfy a
+client bug would be the wrong repair.
+
+**The RPC drops connections.** TLS record errors, resets, and CDN 502
+pages arrive mid-flight, including while polling a receipt — where
+aborting strands a transaction that was already submitted. `conftest.py`
+patches the provider's transport to retry those, and only those: a
+JSON-RPC error is a real answer and is raised immediately. Re-broadcast
+is safe because the raw transaction is already signed, so its nonce and
+hash are fixed.
+
+**Assert on the rule, not on the failure.** `must_fail` returns the
+contract's own rollback payload (`leader_receipt[0]["result"]["payload"]`),
+so a test can require `illegal transition from FUNDED` rather than
+accepting any error. A test satisfied by any failure keeps passing when
+the call starts failing for an unrelated reason, and quietly stops
+testing what it was written for.
 
 ## 4. Deployment
 

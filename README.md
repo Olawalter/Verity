@@ -285,6 +285,7 @@ That comparison was run against this deployment and matched.
 ```
 genvm-lint check      passes — 28 methods (10 view, 18 write)
 pytest tests/direct   101 passed
+gltest tests/integr.  5 passed on StudioNet, real panel  (6m32s)
 tsc --noEmit          clean
 next build            clean, 12 routes
 ```
@@ -295,10 +296,28 @@ and LLM failure modes, settlement policy mapping, critical-requirement
 override, UNVERIFIABLE handling, appeals, the passport, and the
 equivalence rules that decide what can reach consensus.
 
-`tests/integration/` drives a real panel on a live network. It needs two
-funded accounts, which this repository does not carry — see
-[DEVELOPMENT.md](./DEVELOPMENT.md#3-testing) to run it, and the
-limitations below for what that means.
+`tests/integration/` drives a **real panel on StudioNet** — no mocks. Two
+of the five tests run a full round in which leader and validators each
+retrieve the evidence themselves, each run the prompt, and each compare
+decision fingerprints:
+
+- **consensus on retrievable evidence** — accept → submit evidence →
+  deliver → dispute → freeze → adjudicate. The panel agreed, a verdict
+  was stored, and the contract's own score matched the weighted sum of
+  the requirements it marked PASS. Escrow stayed held: a verdict is not
+  a payout.
+- **unreachable evidence does not pass** — the same flow against a
+  domain that cannot resolve. The critical requirement came back
+  UNVERIFIABLE rather than PASS, and evidence quality graded down. The
+  panel refused to certify a source it could not read.
+
+Plus three on-chain checks with no panel: the live protocol vocabulary,
+funding recording real custody and locking terms (refused with
+`[EXPECTED] illegal transition from FUNDED`), and cancellation returning
+escrow.
+
+Running it needs two funded accounts — see
+[DEVELOPMENT.md](./DEVELOPMENT.md#3-testing).
 
 Further reading: [ARCHITECTURE.md](./ARCHITECTURE.md) ·
 [SECURITY.md](./SECURITY.md) · [DEVELOPMENT.md](./DEVELOPMENT.md)
@@ -327,10 +346,15 @@ Stated plainly rather than left implicit.
 - **Panel capture is out of scope.** A compromised validator majority can
   agree on a false verdict; that is GenLayer's trust model. The bounded
   appeal exists so a bad round can be contested once.
-- **The live E2E has not been driven on chain.** The contract is
-  deployed, byte-verified and answering reads, and the deployment itself
-  reached 5-of-5 validator agreement. The full
-  dispute→freeze→adjudicate→finalize→settle path is proven by the direct
-  suite and written up as an integration suite, but that suite has not
-  been executed against a live panel — it needs two funded accounts this
-  repository does not carry. Stated here rather than implied away.
+- **Settlement is proven in the direct suite, not yet on a live panel.**
+  The live suite drives accept → evidence → deliver → dispute → freeze →
+  adjudicate through real consensus, and stops at the stored verdict.
+  Finalize and settle are covered by 101 direct tests but have not been
+  executed on chain, because advancing an appeal window means ticking a
+  hosted network forward and the payout arithmetic is deterministic
+  either way. The gap is small and named rather than papered over.
+- **A live round depends on sources being reachable from every node.**
+  Both panel tests passed on the first attempt, but a flaky source
+  produces different inputs for different validators and can legitimately
+  break a round. That is correct behaviour, not a bug — it just costs a
+  round.
