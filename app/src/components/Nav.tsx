@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { Menu, X, ShieldCheck } from "lucide-react";
+import { Menu, X } from "lucide-react";
 import { useVerity } from "@/lib/useVerity";
 import { CHAIN_NAME } from "@/lib/config";
 
@@ -42,9 +42,16 @@ export function Nav() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
         <div className="flex items-center gap-8 min-w-0">
           <Link href="/" className="flex items-center gap-2 shrink-0">
-            <div className="w-8 h-8 rounded-lg bg-brand-500 grid place-items-center">
-              <ShieldCheck className="w-5 h-5 text-white" aria-hidden="true" />
-            </div>
+            {/* The build's own mark, not a stock glyph — the same file
+                Next serves as the favicon (app/icon.svg), so the tab and
+                the shell cannot drift apart. */}
+            <svg viewBox="0 0 32 32" className="w-8 h-8 shrink-0" aria-hidden="true">
+              <rect width="32" height="32" rx="8" fill="#6D5EF7" />
+              <g fill="none" stroke="#FFFFFF" strokeWidth="2.6" strokeLinecap="round">
+                <path d="M8.5 16.4 L13.8 21.7" strokeDasharray="2.1 2.5" opacity="0.92" />
+                <path d="M13.8 21.7 L23.6 9.8" />
+              </g>
+            </svg>
             <div className="leading-tight">
               <div className="font-semibold tracking-tight text-ink dark:text-night-text">VERITY</div>
               {/* Hidden below `sm`: at 375px the wordmark, the tagline and

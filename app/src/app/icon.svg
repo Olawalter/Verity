@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Verity">
+  <!--
+    The mark is the protocol's one idea, drawn.
+
+    A tick in two strokes that are deliberately not alike. The
+    descending arm is broken into segments: the separate requirements,
+    each weighed on its own evidence. The ascending arm is unbroken:
+    the single consequence the contract derives from them.
+
+    Many determinations in, one settlement out — and the join between
+    them is the only place the two ever meet.
+  -->
+  <rect width="32" height="32" rx="8" fill="#6D5EF7"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="2.6" stroke-linecap="round">
+    <path d="M8.5 16.4 L13.8 21.7" stroke-dasharray="2.1 2.5" opacity="0.92"/>
+    <path d="M13.8 21.7 L23.6 9.8"/>
+  </g>
+</svg>

@@ -1,380 +1,387 @@
-# Verity
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Olawalter/Verity/main/app/src/app/icon.svg" width="140" alt="Verity"/>
+</p>
 
-> A GenLayer-native verification and settlement protocol for autonomous
-> agent work.
->
-> **Verify what agents promise.**
+# Verity - verification and settlement for autonomous agent work
+
+**Verify what agents promise.**
+
+Verity is a GenLayer protocol for agreements between autonomous agents, where
+payment depends on whether the work was actually done. GenLayer decides what
+the evidence shows; the contract decides what follows from it, and holds the
+escrow until it does. The two are separated on purpose, and there is no code
+path from a model's output to an amount of money.
+
+Live app: not yet deployed. The contract is live and byte-verified - see
+[Contract](#contract).
 
 ---
 
-## The problem
+## What it is
 
-Agents increasingly hire, pay, and work for other agents. A deterministic
-smart contract can verify a great deal:
+- **A verification constitution, frozen at funding.** Requirements with integer
+  weights summing to 100, each typed DETERMINISTIC, EVIDENCE or JUDGMENT, and
+  each optionally critical. Hashed at funding and re-checked before every
+  adjudication and every settlement.
+- **An adversarial panel, not a rubber stamp.** Leader and validators each
+  retrieve the evidence themselves, each run the prompt, and compare
+  determinations. A validator does not inspect the leader's answer for
+  well-formedness and call that verification.
+- **Escrow the model cannot reach.** The panel returns per-requirement results.
+  The contract sums the frozen weights, resolves the policy, and pays. A verdict
+  that names its own payout is not rejected - the field is never read.
+- **Evidence treated as a claim until retrieved.** Fields are stored as
+  `claimed_content_hash` and `claimed_independence`. Only a `FETCH_SUCCESS`
+  carries content into the prompt; a 404 page body is not the document.
+- **Consensus on what has a consequence, and only that.** Fields that change a
+  payout must match across validators. Fields that are merely recorded must not
+  gate the round - that lesson cost two live rounds, and is documented below.
 
-- wallet addresses, token deposits, deadlines, signatures, hashes,
-  contract state, whether a required transaction occurred.
+## How it works
 
-It cannot answer the question that actually decides most agreements:
+### For a requester hiring an agent
 
-- *Did the agent actually complete the work?*
-- *Does the deliverable satisfy the agreed acceptance criteria?*
-- *Does the evidence support the claim?*
-- *Are two sources genuinely independent, or the same wire story twice?*
+1. Write the agreement and the requirements, with weights and critical flags.
+   Set the settlement policy for each possible verdict.
+2. Fund the job. The payment moves into escrow, the terms lock, and the
+   constitution is hashed. Nothing is editable after this.
+3. Review the deliverable. Accept it and the agent is paid in full.
+4. Or dispute it - naming which requirements failed, because "I don't like it"
+   is not a dispute. Evidence freezes and the panel is asked.
+5. After the appeal window closes, finalize and settle. Payment splits by the
+   score the contract derived.
 
-Verity splits deterministic enforcement from decentralized judgment:
+### For an agent taking work
 
-```
-GenLayer determines MEANING.        The contract determines CONSEQUENCES.
+1. Accept the job. Post the performance bond if the agreement asks for one, and
+   optionally commit to an execution plan hash.
+2. File evidence against specific requirements - a URL, its role, and what you
+   claim about it.
+3. Submit the deliverable before the execution deadline.
+4. If disputed, respond with your account and counter-evidence, then let the
+   panel read the frozen record.
+5. Collect. Your bond comes back whether you won or lost: underperforming is not
+   misconduct.
 
-per-requirement PASS / FAIL /       score = Σ weight of passed requirements
-  UNVERIFIABLE                      payout = escrow × score ÷ 100
-evidence quality                    who receives it, and when
-fraud flags
-```
+## Verdicts
 
-The adjudicating panel returns requirement-level results against an
-immutable constitution. It never returns an amount, a percentage, a
-recipient, or a weight — and that is a property of the code, not a
-policy: `_normalize_verdict` returns a fixed key set, so a verdict
-carrying `agent_payout: 999999999` is not rejected, it is simply never
-read. There is no code path from model output to money.
+| Verdict | Meaning | Default settlement |
+|---|---|---|
+| `VERIFIED` | every requirement passed | `FULL` - agent takes the payment |
+| `PARTIAL` | some passed, some failed | `PROPORTIONAL` - agent takes score%, requester the rest |
+| `FAILED` | the work does not meet the agreement | `REFUND` - requester takes the payment |
+| `UNVERIFIABLE` | the record cannot support a conclusion | `HUMAN_REVIEW` - nothing settles, escrow waits |
 
-## Why GenLayer is the native core
-
-Everything except the judgment could run on any chain. The judgment
-cannot: it needs a model to read unstructured evidence, and it needs
-several independent parties to agree on what that evidence shows.
-
-`adjudicate()` runs `gl.vm.run_nondet_unsafe` with a custom validator.
-Leader **and every validator** independently retrieve the same evidence
-URLs, run the same prompt, normalise with the same code, and compare
-decision fingerprints. A validator does not inspect the leader's answer
-for well-formedness and call that verification — it produces its own
-verdict. Agreement means several nodes reading the same evidence reached
-the same determinations.
+A failed **critical** requirement overrides the score entirely under the
+`FAIL_JOB` policy. A job can score 85 and still refund in full, because the one
+requirement the requester declared non-negotiable did not hold.
 
 ## Lifecycle
 
-```
+```text
 DRAFT ──fund──► FUNDED ──accept──► ACTIVE ──submit──► SUBMITTED
-  │                │                  │                   │
-  │                │                  └──expire──►EXPIRED │
-  └─cancel─►CANCELLED                                      │
-                                        ┌──────────────────┴──────────────┐
-                                     accept_work                     open_dispute
-                                        │                                 │
-                                    ACCEPTED                          DISPUTED
-                                        │                                 │
-                                        │                        freeze_evidence
-                                        │                                 │
-                                        │                         EVIDENCE_FROZEN
-                                        │                                 │
-                                        │                          adjudicate
-                                        │                                 │
-                                        │                             VERDICT
-                                        │                        ┌────────┴────────┐
-                                        │                     appeal          finalize
-                                        │                        │                 │
-                                        │                    APPEALED         FINALIZED
-                                        │                        │                 │
-                                        │                  adjudicate              │
-                                        └───────────────────┬────────────────────┬─┘
-                                                         settle              recover_escrow
-                                                            │                    │
-                                                        SETTLED              REFUNDED
+  │                                   │                   │
+  └──cancel──► CANCELLED              └──expire──► EXPIRED │
+                                                           │
+                          ┌────────────────────────────────┴──────┐
+                    accept_work                              open_dispute
+                          │                                        │
+                     ACCEPTED ──settle──► SETTLED             DISPUTED
+                                                                   │
+                                                          freeze_evidence
+                                                                   │
+                                                           EVIDENCE_FROZEN
+                                                                   │
+                                                             adjudicate
+                                                                   │
+                                                            ADJUDICATING
+                                                                   │
+                                                              VERDICT
+                                                      ┌────────────┴──────────┐
+                                                   appeal          finalize_verdict
+                                                      │                       │
+                                                 APPEALED                FINALIZED
+                                                      │                       │
+                                          adjudicate  ▼                       │
+                                              FINAL_ADJUDICATION              │
+                                                      │                       │
+                                                      └──► VERDICT ───────────┤
+                                                                              │
+                                                   ┌──────────────────────────┤
+                                                settle                 recover_escrow
+                                                   │                          │
+                                               SETTLED                    REFUNDED
 ```
 
-`VERDICT` is **not** `FINALIZED`. A verdict accepted by consensus is not
-yet spendable; it becomes spendable only after the appeal window has
-actually elapsed. `final_verdict_id` pins which verdict settlement pays
-on, so a later round cannot redirect an already-final payout.
+| Status | Escrow held | What can happen next |
+|---|---|---|
+| `DRAFT` | no | fund, cancel, amend the terms |
+| `FUNDED` | yes | agent accepts, or requester cancels |
+| `ACTIVE` | yes | agent submits, or the deadline expires it |
+| `SUBMITTED` | yes | requester accepts or disputes |
+| `ACCEPTED` | yes | settle in full |
+| `DISPUTED` | yes | freeze the evidence |
+| `EVIDENCE_FROZEN` | yes | adjudicate |
+| `ADJUDICATING` | yes | the round resolves, or fails and returns here |
+| `VERDICT` | yes | appeal, finalize, or recover if unverifiable |
+| `APPEALED` | yes | one further adjudication |
+| `FINAL_ADJUDICATION` | yes | the appeal round resolves |
+| `FINALIZED` | yes | settle, or recover if unverifiable |
+| `SETTLED` `CANCELLED` `REFUNDED` | no | terminal |
+| `EXPIRED` | yes | recover the escrow |
 
-## Verification constitution
+`VERDICT` is deliberately not `FINALIZED`. A verdict accepted by consensus is
+not yet spendable; it becomes spendable only once the appeal window has actually
+elapsed, and `final_verdict_id` pins which verdict a settlement pays on so a
+later round cannot redirect it.
 
-Every job carries a machine-readable constitution, frozen at funding:
+## GenLayer consensus functions
 
-```json
-{
-  "requirements": [
-    { "id": "R1", "description": "Issue is actually resolved",
-      "type": "JUDGMENT", "weight": 30, "critical": true }
-  ],
-  "settlement": {
-    "verified": "FULL", "partial": "PROPORTIONAL",
-    "failed": "REFUND", "unverifiable": "HUMAN_REVIEW",
-    "critical": "FAIL_JOB"
-  }
-}
+| Function | Kind | What runs under consensus |
+|---|---|---|
+| `adjudicate` | `run_nondet_unsafe` | Every node fetches the frozen evidence URLs itself, classifies each retrieval, runs the adjudication prompt, normalises the response with the same code, and compares decision fingerprints. Agreement means independent nodes reading the same record reached the same determinations. |
+
+Everything else in this protocol is deterministic and could run on any chain.
+The judgment could not: it needs a model to read unstructured evidence, and
+several independent parties to agree on what that evidence shows.
+
+**What the fingerprint compares**
+
+```text
+job_id · verdict · per-requirement (id, result) · unverifiable_items
 ```
 
-Requirement types:
+**What it deliberately excludes** - `reasoning`, `reason_code`,
+`evidence_quality` and `fraud_flags`. All four are stored on the verdict and
+shown in the UI. None of them is read by `_compute_settlement`, `_resolve_policy`,
+the score, or any state transition. Requiring independent validators to agree on
+a field that changes nothing can only lose rounds, and it did - see
+[Verified end-to-end](#verified-end-to-end).
 
-| Type | Meaning |
+## Contract
+
+| | |
 |---|---|
-| `DETERMINISTIC` | the contract itself could check it — a hash exists, a deadline held |
-| `EVIDENCE` | external information is required — a CI result, a diff |
-| `JUDGMENT` | semantic interpretation is required — *does this actually fix the issue?* |
+| Network | GenLayer StudioNet |
+| Chain ID | 61999 |
+| RPC | `https://studio.genlayer.com/api` |
+| Address | `0xf1443Af9A2c708E09BeA2EAbcD608502c016Dc2c` |
+| Runner | `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6` |
+| Source | [`contracts/verity.py`](contracts/verity.py) - sha256 `7db00c085cb9d6eaf443182b71c75436b594549e7f5a7396d175f7803e2ea9eb` |
+| Verify | `genlayer code <address> > onchain.py && python scripts/verify_deployment.py onchain.py` |
 
-Weights are integers summing to exactly 100. The model may never
-redefine a weight, a payout percentage, a settlement policy, or the
-critical-requirement policy. It determines results **under** the
-constitution.
+No explorer link: the public Studio explorer is returning 503, and the Studio
+Next explorer indexes a different chain, so a link to either would be decoration
+rather than evidence. The address above is a claim until someone checks it, so
+the check ships with the repository instead. `verify_deployment.py` normalises CRLF, the CLI's BOM and
+`Result:` banner, and trailing blank lines - then demands the rest match byte
+for byte, comments included. It was run against this deployment and matched.
 
-## Settlement
+### Write methods
 
+| Method | Who | Payable | Notes |
+|---|---|---|---|
+| `create_job` | requester | no | Names the agent, the requirements and the settlement policies |
+| `update_draft` | requester | no | DRAFT only; the amendment path exists so tampering has something to fail against |
+| `fund_job` | requester | **yes** | Records `gl.message.value`; locks the terms and hashes the constitution |
+| `accept_job` | agent | **yes** | Exact performance bond, or zero if the job asks for none |
+| `submit_evidence` | either party | no | A receipt binding a URL to a requirement; every field is a claim |
+| `submit_deliverable` | agent | no | Closes execution and opens the acceptance window |
+| `accept_work` | requester | no | Ends it without adjudication; the agent is paid in full |
+| `open_dispute` | requester | **yes** | Must name which requirements failed; exact dispute bond |
+| `respond_to_dispute` | agent | no | The agent's account and counter-evidence |
+| `freeze_evidence` | either party | no | Snapshots and hashes the admissible set; nothing is admissible after |
+| `adjudicate` | either party | no | The consensus round; leaves state untouched if it fails |
+| `appeal` | either party | no | One bounded appeal, reading the same frozen record |
+| `finalize_verdict` | either party or owner | no | Only once the appeal window has elapsed; pins `final_verdict_id` |
+| `settle` | either party or owner | no | Derives the split and releases escrow |
+| `cancel_job` | requester | no | Before acceptance; refunds in full |
+| `expire_job` | either party | no | Past the execution deadline with no delivery |
+| `recover_escrow` | either party or owner | no | Escape hatch for a job that cannot settle normally |
+| `tick` | anyone | no | Advances the protocol clock |
+
+### Read methods
+
+`get_protocol_info` · `get_job` · `list_jobs` · `get_requirements` ·
+`get_evidence` · `get_dispute` · `list_verdicts` · `get_verdict` ·
+`get_settlement` · `get_passport`
+
+### Consensus guarantees
+
+- The panel returns requirement-level results. It never returns an amount, a
+  percentage, a recipient or a weight, and `_normalize_verdict` returns a fixed
+  key set, so an invented `agent_payout` is dropped structurally rather than
+  rejected by name.
+- The score is the contract's own sum over the frozen weights, computed after
+  consensus.
+- Terms and custody are separate fields. Settlement reads `payment_deposited`,
+  what the chain actually moved - not `payment_wei`, what was agreed.
+- All value leaves through one helper, from three call sites. The held balance
+  is driven to zero and the terminal state persisted before a single wei moves.
+- A failed round consumes nothing: no verdict stored, no escrow moved, and the
+  job stays in `EVIDENCE_FROZEN` so the call can simply be retried.
+- Unavailable evidence supports `UNVERIFIABLE`, never `PASS`.
+
+## Verified end-to-end
+
+Six tests against StudioNet with a real validator panel - no mocks, real
+retrieval, real GEN.
+
+```text
+$ gltest tests/integration -v -s --network studionet
+
+deployed disposable Verity at 0x4Bc8d70A01CDd9E6da9A656016e1B503F29D9363
+test_protocol_surface_is_live_and_closed              PASSED
+test_funding_locks_terms_and_records_real_custody     PASSED
+test_cancel_returns_escrow_before_acceptance          PASSED
+test_live_panel_reaches_consensus_on_retrievable_evidence  PASSED
+test_unreachable_evidence_does_not_pass               PASSED
+test_settlement_moves_real_balances
+  panel returned VERIFIED score=100 -> policy FULL
+  settled FULL: agent +2.0 GEN, requester +0.0 GEN
+                                                      PASSED
+
+======================== 6 passed in 570.64s (0:09:30) ========================
 ```
-score          = Σ weight[r] for every requirement marked PASS
-policy         = constitution[verdict]     (critical failure may override)
-FULL           → agent takes the payment
-PROPORTIONAL   → agent takes payment × score ÷ 100, requester the rest
-REFUND         → requester takes the payment
-HUMAN_REVIEW   → nothing settles; escrow waits for recover_escrow
-```
 
-The spec's worked example, and a passing test:
+What those six establish:
 
-```
-escrow 100 GEN · R1 PASS 30 · R2 PASS 25 · R3 PASS 20
-                 R4 FAIL 10 · R5 FAIL 10 · R6 PASS  5
-score 80 → agent 80 GEN, requester 20 GEN, escrow 0
-```
+- **A real panel agrees.** Independent validators fetched the same document, ran
+  the prompt separately, and produced matching determinations.
+- **Unreachable evidence does not pass.** Against a domain that cannot resolve,
+  both requirements came back exactly `UNVERIFIABLE`, the score was 0, and the
+  escrow did not move. The test demands `UNVERIFIABLE` specifically rather than
+  accepting `FAIL` too - tolerating either answer is tolerating the ambiguity
+  that splits validators.
+- **Money actually moves.** Settling from `VERDICT` was refused; after the appeal
+  window closed, `finalize_verdict` then `settle` ran to FINALIZED and the
+  agent's on-chain balance rose by exactly 2 GEN. The expected figure is derived
+  independently from the frozen weights, so the test does not merely agree with
+  whatever the contract computed.
 
-Integer arithmetic throughout; no float touches a weight or an amount.
-Rounding remainders go to the **requester**, because `requester_payout`
-is computed by subtraction — the party owed a refund is never short by a
-rounding artefact.
+> **The round that failed first, and why it mattered.** An earlier run failed two
+> adjudications with the leader receipt reporting SUCCESS while nothing was
+> committed. The cause was `evidence_quality` sitting inside the fingerprint. It
+> had a genuinely total rule - count the sources that returned `FETCH_SUCCESS` -
+> and it still broke rounds, because retrieval itself differs between nodes. One
+> validator's fetch times out, its count differs by one, and the round dies over
+> a field that could not have moved a payout by a wei. A total rule is necessary
+> and not sufficient; the input has to be identical too, and retrieval is not.
+> The fix was to require agreement on everything that has a consequence, and only
+> on that.
 
-What must match across validators is the *determination*, so the
-fingerprint is a narrow projection: `job_id`, the verdict, each
-requirement's `(id, result)`, and `unverifiable_items`. The rule, learned
-by watching live rounds fail:
+Offline: **104 direct tests**, plus `genvm-lint` clean at 28 methods (10 view,
+18 write), `tsc --noEmit` clean, and a clean frontend build across 12 routes.
+CI runs all four on every push.
 
-> **Require agreement on everything that has a consequence, and only on
-> that.**
+## Tech stack
 
-`reasoning`, `reason_code`, `evidence_quality` and `fraud_flags` are all
-recorded on the verdict and shown in the UI, and none of them is read by
-`_compute_settlement`, `_resolve_policy`, the score, or any state
-transition. Two direct tests prove it by swapping them and showing the
-payout is byte-identical. Demanding that independent nodes agree on a
-field that cannot move a wei only loses rounds.
-
-## Escrow
-
-Custody and terms are separate fields, and settlement reads custody:
-
-```
-payment_wei          agent_bond_wei          dispute_bond_wei        ← TERMS
-payment_deposited    agent_bond_deposited    dispute_bond_deposited  ← MONEY
-```
-
-`fund_job` is `@gl.public.write.payable` and records `gl.message.value`,
-the figure the chain actually moved. All value leaves through one helper,
-`_send_gen`, on three paths only — `settle`, `cancel_job`,
-`recover_escrow` — and every one follows:
-
-```
-read ledgers → validate → compute → ZERO ledgers → persist → emit transfer
-```
-
-Bonds return to whoever posted them. A requester who disputes and loses
-is **not** punished, and an agent who merely underperforms is **not**
-slashed — bad faith needs explicit criteria, and ordinary task failure is
-not misconduct.
-
-## Evidence
-
-Every field a submitter provides is a **claim**, and the record names it
-as one: `claimed_content_hash`, `claimed_independence`. The contract
-verifies none of it. What establishes anything is retrieval during
-adjudication, where validators fetch the URL themselves and each outcome
-is classified:
-
-| Label | Carries content? |
+| Layer | Choice |
 |---|---|
-| `FETCH_SUCCESS` | **yes** |
-| `NON_SUCCESS_RESPONSE` | no — an error page is not the document |
-| `EMPTY_CONTENT` | no |
-| `FETCH_FAILURE` | no |
+| Contract | Python on GenVM, pinned runner |
+| Consensus | `gl.vm.run_nondet_unsafe` with a re-running validator |
+| Retrieval | `gl.nondet.web.get`, classified fail-closed |
+| Contract tests | `gltest` direct mode + `pytest` |
+| Live tests | `gltest` against StudioNet |
+| Frontend | Next.js 16, React 19, TypeScript strict, Tailwind |
+| Wallet | RainbowKit + Wagmi + Viem, EIP-6963 discovery |
+| Chain client | `genlayer-js` |
+| Data | TanStack Query, refetched from chain after every write |
 
-> **unavailable evidence ≠ verified evidence**
+## Repository
 
-Unread is also not the same as *refuted*. If every source filed against
-a requirement failed to return `FETCH_SUCCESS`, the answer is
-`UNVERIFIABLE`, never `FAIL` — absence of proof is not proof of absence,
-and the two settle very differently: `FAIL` scores zero, `UNVERIFIABLE`
-sends the job to human review with the escrow untouched.
+```text
+contracts/verity.py          the protocol, one file
+scripts/verify_deployment.py proves the deployment matches the source
+tests/direct/                104 tests, offline
+  test_job.py                agreements, weights, immutability
+  test_escrow.py             custody, bonds, adversarial payout sequences
+  test_evidence.py           receipts, claims, freezing, cross-job binding
+  test_adjudication.py       disputes, verdict schema, LLM failure modes
+  test_settlement.py         policy mapping, critical override, appeals
+  test_equivalence.py        what reaches consensus, and what cannot touch money
+tests/integration/           6 tests, live panel
+app/                         Next.js frontend, 12 routes
+  src/app/icon.svg           the build's mark, served as the favicon
+.github/workflows/ci.yml     lint, direct suite, typecheck, build
+```
 
-Source independence is a verification property, not a URL-counting
-trick: two hosts republishing one origin are not two independent sources.
-The submitter declares `INDEPENDENT | RELATED | SAME_ORIGIN | UNKNOWN`;
-the panel judges the claim from what it retrieved.
-
-When a dispute opens, `freeze_evidence` snapshots and hashes the set.
-After that nothing is admissible, and the panel reads the frozen
-snapshot.
-
-External text is **data, never instructions**. The prompt says so, and a
-source that appears to contain directions is flagged rather than obeyed.
-
-## Quick start
+## Getting started
 
 ```bash
 pip install -r requirements.txt
-genvm-lint check contracts/verity.py       # lint
-pytest tests/direct/ -v                    # 90 tests, ~80s
-
-cd app && npm install
-npm run typecheck && npm run build
-npm run dev                                # http://localhost:3120
+genvm-lint check contracts/verity.py
+pytest tests/direct/ -q
 ```
 
-Deploy:
+```bash
+cd app
+npm install
+cp .env.example .env.local        # set NEXT_PUBLIC_CONTRACT_ADDRESS
+npm run dev                       # http://localhost:3120
+```
+
+Deploy and verify:
 
 ```bash
 genlayer network set studionet
 genlayer deploy --contract contracts/verity.py
-genlayer schema <address>
-```
-
-Then set `NEXT_PUBLIC_CONTRACT_ADDRESS` in `app/.env.local`.
-
-## Live deployment
-
-- Network: **GenLayer StudioNet** (chain id 61999)
-- Contract: `0xf1443Af9A2c708E09BeA2EAbcD608502c016Dc2c`
-- Deploy tx: `0xce903a4d168c69220fa9b638a266ec58846060b6339cac2d360d1b0ed6a0b031`
-- Consensus on deploy: 5 validators, 5 AGREE
-- Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
-- Source sha256: `7db00c085cb9d6eaf443182b71c75436b594549e7f5a7396d175f7803e2ea9eb`
-
-The address is a claim until someone checks it, so the check ships with
-the repository:
-
-```bash
-genlayer code 0xf1443Af9A2c708E09BeA2EAbcD608502c016Dc2c > onchain.py
+genlayer code <address> > onchain.py
 python scripts/verify_deployment.py onchain.py
-# MATCH   sha256 7db00c085cb9d6eaf443182b71c75436b594549e7f5a7396d175f7803e2ea9eb
 ```
 
-That comparison was run against this deployment and matched.
+The live suite needs two funded StudioNet accounts and takes minutes per round.
+[DEVELOPMENT.md](DEVELOPMENT.md) covers the setup, the three tooling traps it
+works around, and what to do when consensus fails.
 
-## Environment variables
+## Security
 
-| Variable | Required | Purpose |
-|---|---|---|
-| `NEXT_PUBLIC_CONTRACT_ADDRESS` | **yes** | deployed Verity contract; without it the app reads nothing and says so |
-| `NEXT_PUBLIC_GENLAYER_RPC_URL` | no | overrides the SDK's default RPC |
-| `NEXT_PUBLIC_EXPLORER_URL` | no | block explorer base URL |
-| `NEXT_PUBLIC_DEPLOY_ENV` | no | label shown in Settings |
-| `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID` | no | enables WalletConnect; injected wallets work without it |
+- Every write opens with a named guard: the job exists, the caller is the right
+  party, the transition is legal, the constitution still hashes the same.
+- Deposits come only from `gl.message.value`. Bond amounts are exact - over- and
+  under-payment both revert, and no change is given.
+- One transfer helper, three call sites, recipients read from storage. There is
+  no function that takes a recipient and an amount from the caller.
+- Payouts are asserted to sum to custody exactly, twice. Integer arithmetic
+  throughout; rounding remainders fall to the requester by construction.
+- Retrieved text is data, never instructions. A source containing directions to
+  the adjudicator is flagged, not obeyed.
+- The owner is a keeper, not an authority: it may tick, settle and recover, and
+  every one of those runs the same computation it would for anyone else.
+- No seed phrase, private key or wallet password is requested, stored or logged
+  anywhere in the app.
 
-## Routes
+[SECURITY.md](SECURITY.md) has the full model, including the assumptions this
+protocol makes and does not hide.
 
-```
-/                    landing + live protocol state
-/dashboard           your jobs, escrow held, awaiting review, disputed
-/jobs                every job on the contract
-/jobs/create         five-step wizard: agreement → requirements →
-                     evidence rules → settlement → review & fund
-/jobs/[id]           agreement, requirements, evidence, verdicts,
-                     escrow, timeline, and every legal action
-/disputes            open disputes
-/disputes/[id]       disputed requirements, requester claim, agent
-                     response, adjudication, settlement
-/verification        jobs under or past adjudication
-/verification/[id]   progress sequence, frozen evidence, verdict
-/passport/[address]  an agent's evidence-backed verification history
-/history             terminal jobs
-/settings            effective configuration, read from the running app
-```
+## Design notes
 
-## Testing
+- **Bonds return to whoever posted them.** A requester who disputes and loses is
+  not punished, and an agent who underperforms is not slashed. Punishing a
+  good-faith dispute deters legitimate disputes, and ordinary task failure is not
+  misconduct - slashing needs explicit bad-faith criteria this protocol does not
+  claim to have.
+- **`UNVERIFIABLE` is a real answer, not a failure to answer.** It routes to
+  human review with the escrow untouched. Guessing a split for a record that
+  cannot support a conclusion would be inventing a verdict.
+- **The clock is a tick counter, not a wall clock.** `gl.message.datetime` is not
+  populated in every runtime this contract must run in, and a deadline that
+  silently reads zero is worse than one that is openly abstract. Deadlines are
+  absolute tick values, and the UI shows `PROTOCOL TICK` rather than dressing it
+  up as elapsed time.
+- **Content hashes are not verified.** `claimed_content_hash` is never compared
+  against retrieved bytes. The guarantee is that validators read the real source,
+  not that the bytes matched a hash the submitter supplied - and the field is
+  named as a claim so nothing reads it as more.
+- **Evidence has exactly one home in storage.** One array, with pointers into it.
+  A record stored twice is a record that drifts.
 
-```
-genvm-lint check      passes — 28 methods (10 view, 18 write)
-pytest tests/direct   104 passed
-gltest tests/integr.  6 passed on StudioNet, real panel  (9m30s)
-tsc --noEmit          clean
-next build            clean, 12 routes
-```
+## Disclaimer
 
-Direct tests cover agreements, escrow (including the §62 adversarial
-payout sequences), evidence and freezing, disputes, verdict validation
-and LLM failure modes, settlement policy mapping, critical-requirement
-override, UNVERIFIABLE handling, appeals, the passport, and the
-equivalence rules that decide what can reach consensus.
-
-`tests/integration/` drives a **real panel on StudioNet** — no mocks. Two
-of the five tests run a full round in which leader and validators each
-retrieve the evidence themselves, each run the prompt, and each compare
-decision fingerprints:
-
-- **consensus on retrievable evidence** — accept → submit evidence →
-  deliver → dispute → freeze → adjudicate. The panel agreed, a verdict
-  was stored, and the contract's own score matched the weighted sum of
-  the requirements it marked PASS. Escrow stayed held: a verdict is not
-  a payout.
-- **unreachable evidence does not pass** — the same flow against a
-  domain that cannot resolve. Both requirements came back exactly
-  `UNVERIFIABLE`, the verdict was `UNVERIFIABLE`, the score was 0, and
-  the escrow did not move. The test demands `UNVERIFIABLE` specifically
-  rather than accepting `FAIL` as well: tolerating either answer is
-  tolerating the ambiguity that splits validators.
-
-- **settlement moves real balances** — the whole arc, carried past the
-  verdict. Settling straight from `VERDICT` is refused; the appeal
-  window is ticked closed; `finalize_verdict` pins `final_verdict_id`;
-  then `settle` runs to **FINALIZED**, because payouts emit
-  `on="finalized"`. The panel returned VERIFIED / score 100, the
-  constitution maps that to FULL, and the agent's on-chain balance rose
-  by exactly the escrowed 2 GEN. The expected figure is derived
-  independently from the frozen weights and the panel's determinations,
-  so the test does not simply agree with whatever the contract computed.
-
-Plus three on-chain checks with no panel: the live protocol vocabulary,
-funding recording real custody and locking terms (refused with
-`[EXPECTED] illegal transition from FUNDED`), and cancellation returning
-escrow.
-
-Running it needs two funded accounts — see
-[DEVELOPMENT.md](./DEVELOPMENT.md#3-testing).
-
-Further reading: [ARCHITECTURE.md](./ARCHITECTURE.md) ·
-[SECURITY.md](./SECURITY.md) · [DEVELOPMENT.md](./DEVELOPMENT.md)
-
-## Known limitations
-
-Stated plainly rather than left implicit.
-
-- **The clock is a tick counter, not a wall clock.**
-  `gl.message.datetime` is not populated in every runtime this contract
-  must work in, and a deadline that silently reads zero is worse than one
-  that is explicitly abstract. Deadlines are absolute tick values, and
-  `tick()` is public so any account can age one forward. Consequence:
-  deadlines advance with protocol activity rather than elapsed time.
-- **Content hashes are not verified.** A `claimed_content_hash` is never
-  compared against retrieved bytes. The guarantee is *"validators read
-  the real source"*, not *"the hash matched"*. The field is named as a
-  claim so the UI and the panel both treat it as one.
-- **Direct mode runs the leader only.** Validator agreement is exercised
-  by the shared normaliser and fingerprint — those functions *are* the
-  equivalence rule — and on a live network.
-- **Retrieval outcomes can legitimately differ between validators.** A
-  source reachable for one node and not another produces different inputs
-  and can break a round. That is correct behaviour, but a flaky source
-  costs rounds.
-- **Panel capture is out of scope.** A compromised validator majority can
-  agree on a false verdict; that is GenLayer's trust model. The bounded
-  appeal exists so a bad round can be contested once.
-- **The appeal path is proven in direct tests only.** `appeal` and a
-  second adjudication round are covered offline; the live suite settles
-  on a first-round verdict. Nothing about the appeal changes the payout
-  arithmetic — `final_verdict_id` pins which verdict pays either way —
-  but it has not been driven through a live panel twice.
-- **A live round depends on sources being reachable from every node.**
-  Both panel tests passed on the first attempt, but a flaky source
-  produces different inputs for different validators and can legitimately
-  break a round. That is correct behaviour, not a bug — it just costs a
-  round.
+Verity is a hackathon build on GenLayer StudioNet, a test network. It has not
+been audited. The escrow logic moves real network tokens on the chain it is
+deployed to, and the settlement path has been exercised end to end, but nothing
+here should hold value you are not prepared to lose. A validator majority acting
+in coordinated bad faith can agree on a false verdict; that is the platform's
+trust model, and the bounded appeal is a way to contest one bad round rather
+than a defence against a captured panel.
