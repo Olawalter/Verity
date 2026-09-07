@@ -16,8 +16,10 @@ How Verity is put together, and why each boundary sits where it does.
 │ evidence_quality             │      │ payout = escrow × score ÷ 100│
 │ fraud_flags                  │      │ recipient, timing, custody   │
 │ unverifiable_items           │      │ state transition             │
-│ reasoning + reason_code      │      │                              │
-│   (recorded, not consensus)  │      │                              │
+│ ─ recorded, not consensus ─  │      │                              │
+│ evidence_quality · fraud_    │      │                              │
+│ flags · reasoning · reason_  │      │                              │
+│ code                         │      │                              │
 └──────────────────────────────┘      └──────────────────────────────┘
         ▲                                        │
         │ frozen evidence + constitution         │ GEN out via _send_gen
@@ -33,7 +35,7 @@ and the constitution — never the raw model object.
 
 ```
 contracts/verity.py        the Intelligent Contract — the whole protocol
-tests/direct/              101 tests, leader path, no network
+tests/direct/              104 tests, leader path, no network
 tests/integration/         gltest suite for a live network
 app/                       Next.js 16 frontend
   src/lib/verity.ts        typed contract client + receipt lifecycle
@@ -290,35 +292,52 @@ projects a verdict down to exactly the fields that must match:
 ```
 job_id · verdict
        · per-requirement (id, result), sorted by id
-       · evidence_quality
-       · fraud_flags, sorted
        · unverifiable_items, sorted
 ```
 
-Note what is *not* there. `reasoning` is prose. `reason_code` is a
-free-form label, and two nodes reaching the identical determination will
-write `TESTS_MISSING` and `NO_TEST_ADDED` — that is agreement, and a
-fingerprint that fails it is measuring vocabulary instead of judgement.
-Both are recorded on the verdict; neither gates consensus.
+That list is short on purpose. The rule it follows, arrived at by
+watching live rounds fail:
 
-The general rule, and the expensive lesson behind it: **anything not
-mechanically derivable from the evidence must stay out of the
-fingerprint**, or rounds fail on judgement calls rather than on facts.
+> **Require agreement on everything that has a consequence, and only on
+> that.**
 
-Each field that *is* included therefore has a total rule behind it — one
-that lands on exactly one answer for every input, including silence:
+`reasoning` and `reason_code` are prose and labels. `evidence_quality`
+and `fraud_flags` are descriptions of the record: they are stored on the
+verdict and shown in the UI, but nothing reads them — not
+`_compute_settlement`, not `_resolve_policy`, not the score, not one
+state transition. Two direct tests pin that down by swapping both fields
+and showing the payout is byte-identical.
+
+`evidence_quality` was the instructive one. It had a perfectly total
+counting rule — how many sources returned `FETCH_SUCCESS` — and it still
+broke rounds, because *retrieval itself differs between nodes*. One
+validator's fetch times out, its count differs by one, and a round dies
+over a field that could not have moved a payout by a single wei. A total
+rule is necessary and not sufficient: the input has to be identical too,
+and retrieval is not.
+
+What remains has a total rule behind it — one that lands on exactly one
+answer for every input, including silence:
 
 | Field | What makes it derivable |
 |---|---|
-| `verdict`, `(id, result)` | the determination itself, from a fixed vocabulary |
-| `evidence_quality` | a counting rule over retrieval labels — how many sources returned `FETCH_SUCCESS`, not how good the reading felt |
-| `fraud_flags` | a closed vocabulary (`VALID_FRAUD_FLAGS`), rejected at normalisation if unrecognised |
+| `(id, result)` | the determination itself, from a fixed vocabulary, with `FAIL` vs `UNVERIFIABLE` decided by a total test (see below) |
+| `verdict` | implied by the results, and coherence-checked during normalisation |
 | `unverifiable_items` | derived by the contract from the results, never taken from the model |
 
-**The prompt does the load-bearing work.** It states each of those rules
-explicitly, and marks `reason_code` as excluded from consensus so a node
-knows it need not match anyone else's wording. Where a rule leaves room
-for interpretation, two honest validators disagree and the round fails.
+**`FAIL` and `UNVERIFIABLE` are not interchangeable, and the prompt now
+says which applies.** `FAIL` means something was read that contradicts
+the requirement. `UNVERIFIABLE` means what was needed could not be read —
+and if *every* source filed against a requirement failed to return
+`FETCH_SUCCESS`, the answer is `UNVERIFIABLE`, never `FAIL`. Leaving that
+open was a real defect: two honest validators split on it, and the two
+settle very differently — `FAIL` scores zero, `UNVERIFIABLE` sends the
+job to human review with the escrow untouched.
+
+**The prompt does the load-bearing work.** It states each rule
+explicitly, and tells the panel outright which fields gate consensus and
+which are merely recorded, so a node does not try to match another's
+wording on a field nobody compares.
 
 **`_normalize_verdict` returns a fixed key set:**
 

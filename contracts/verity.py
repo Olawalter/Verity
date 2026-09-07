@@ -565,9 +565,23 @@ def _decision_fingerprint(norm: dict) -> str:
     That is agreement, and a fingerprint that fails it is measuring
     vocabulary instead of judgement. The DETERMINATION is (id, result).
 
-    `evidence_quality` and `fraud_flags` stay in only because the prompt
-    gives each of them a total rule — a closed vocabulary and a counting
-    rule respectively — so both are derivable from what was retrieved.
+    The rule this settled on, after watching live rounds fail:
+
+        REQUIRE AGREEMENT ON EVERYTHING THAT HAS A CONSEQUENCE,
+        AND ONLY ON THAT.
+
+    `evidence_quality` and `fraud_flags` are recorded on the verdict and
+    shown in the UI, but nothing reads them — not `_compute_settlement`,
+    not `_resolve_policy`, not the score, not a single state transition.
+    They are descriptions of the record, not determinations about the
+    work. `evidence_quality` in particular summarises RETRIEVAL, which
+    legitimately differs between nodes: one validator's fetch times out,
+    its count of FETCH_SUCCESS differs by one, and a round dies over a
+    field that could not have changed a payout by a single wei. Keeping
+    them out costs nothing and removes a whole class of false failure.
+
+    What remains is exactly what money depends on: which requirements
+    passed, the verdict those results imply, and the ids left unresolved.
     """
     return _canon({
         "job_id": norm["job_id"],
@@ -575,8 +589,6 @@ def _decision_fingerprint(norm: dict) -> str:
         "requirements": [
             {"id": r["id"], "result": r["result"]} for r in norm["requirements"]
         ],
-        "evidence_quality": norm["evidence_quality"],
-        "fraud_flags": norm["fraud_flags"],
         "unverifiable_items": norm["unverifiable_items"],
     })
 
@@ -1355,9 +1367,24 @@ class Verity(gl.Contract):
             "    answer. Use it when the record genuinely cannot support a\n"
             "    conclusion. Never guess to avoid it. Unavailable evidence\n"
             "    is NOT failed evidence and NOT passed evidence.\n"
-            "7.  Never APPROVE a requirement on the strength of a source\n"
-            "    you could not read. A FETCH_FAILURE, NON_SUCCESS_RESPONSE\n"
-            "    or EMPTY_CONTENT carries no content and proves nothing.\n"
+            "7.  Never PASS a requirement on the strength of a source you\n"
+            "    could not read. A FETCH_FAILURE, NON_SUCCESS_RESPONSE or\n"
+            "    EMPTY_CONTENT carries no content and proves nothing.\n"
+            "7a. FAIL vs UNVERIFIABLE is decided by WHY, and the test is\n"
+            "    total — exactly one of these applies to every\n"
+            "    requirement you do not PASS:\n"
+            "      FAIL          you read something that positively\n"
+            "                    contradicts the requirement, or the\n"
+            "                    record shows the work was not done.\n"
+            "      UNVERIFIABLE  you could not read what you needed. If\n"
+            "                    EVERY source filed against a requirement\n"
+            "                    failed to return FETCH_SUCCESS, the\n"
+            "                    answer is UNVERIFIABLE — never FAIL.\n"
+            "                    A requirement with NO evidence filed\n"
+            "                    against it at all is also UNVERIFIABLE.\n"
+            "    Absence of proof is not proof of absence, and the two\n"
+            "    settle differently: FAIL scores zero, UNVERIFIABLE sends\n"
+            "    the job to human review with the escrow untouched.\n"
             "8.  You do NOT decide money. Never output an amount, payout,\n"
             "    percentage, weight or recipient. The contract computes\n"
             "    settlement from the frozen weights and real escrow; any\n"
@@ -1408,8 +1435,14 @@ class Verity(gl.Contract):
             "      An unknown string is a malformed response.\n"
             "\n"
             "  reason_code — a short UPPER_SNAKE label for your own\n"
-            "      result. It is recorded but EXCLUDED from consensus, so\n"
-            "      it does not need to match another validator's wording.\n"
+            "      result. Recorded but EXCLUDED from consensus, so it\n"
+            "      does not need to match another validator's wording.\n"
+            "\n"
+            "  evidence_quality and fraud_flags — also recorded, also\n"
+            "      EXCLUDED from consensus. Answer them honestly; they\n"
+            "      need not match another validator, and they cannot move\n"
+            "      a payout. ONLY the per-requirement results can, which\n"
+            "      is why those are the ones that must agree.\n"
             "\n"
             "  unverifiable_items — the contract derives this from your\n"
             "      results. Return an empty list.\n"

@@ -206,10 +206,11 @@ Stated plainly, because an unstated assumption reads as a guarantee.
    and validators identically, so agreement itself cannot be staged
    offline. What the direct suite proves is every property the
    fingerprint rests on. Real agreement between independent nodes is the
-   integration suite's job, and it has been run: two full rounds reached
-   consensus on StudioNet, one on retrievable evidence and one on a
-   source that could not be reached. Settlement itself is still covered
-   only by the direct suite.
+   integration suite's job, and it has been run: three full rounds
+   reached consensus on StudioNet — one on retrievable evidence, one on a
+   source that could not be reached, and one carried through
+   finalization to a settlement whose payout was observed as a real
+   balance change on chain.
 
 ## 9. Frontend security
 

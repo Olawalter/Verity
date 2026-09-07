@@ -146,15 +146,19 @@ is computed by subtraction — the party owed a refund is never short by a
 rounding artefact.
 
 What must match across validators is the *determination*, so the
-fingerprint is a projection: `job_id`, the verdict, each requirement's
-`(id, result)`, `evidence_quality`, `fraud_flags` and
-`unverifiable_items`. The panel's `reasoning` and its per-requirement
-`reason_code` are recorded but excluded — two nodes reaching the
-identical conclusion will not phrase it identically, and a fingerprint
-that fails on that is measuring vocabulary rather than judgement. Every
-field that *is* included has a total rule behind it: a closed fraud
-vocabulary, a counting rule for evidence quality, and
-`unverifiable_items` derived by the contract from the results.
+fingerprint is a narrow projection: `job_id`, the verdict, each
+requirement's `(id, result)`, and `unverifiable_items`. The rule, learned
+by watching live rounds fail:
+
+> **Require agreement on everything that has a consequence, and only on
+> that.**
+
+`reasoning`, `reason_code`, `evidence_quality` and `fraud_flags` are all
+recorded on the verdict and shown in the UI, and none of them is read by
+`_compute_settlement`, `_resolve_policy`, the score, or any state
+transition. Two direct tests prove it by swapping them and showing the
+payout is byte-identical. Demanding that independent nodes agree on a
+field that cannot move a wei only loses rounds.
 
 ## Escrow
 
@@ -196,6 +200,12 @@ is classified:
 
 > **unavailable evidence ≠ verified evidence**
 
+Unread is also not the same as *refuted*. If every source filed against
+a requirement failed to return `FETCH_SUCCESS`, the answer is
+`UNVERIFIABLE`, never `FAIL` — absence of proof is not proof of absence,
+and the two settle very differently: `FAIL` scores zero, `UNVERIFIABLE`
+sends the job to human review with the escrow untouched.
+
 Source independence is a verification property, not a URL-counting
 trick: two hosts republishing one origin are not two independent sources.
 The submitter declares `INDEPENDENT | RELATED | SAME_ORIGIN | UNKNOWN`;
@@ -233,19 +243,19 @@ Then set `NEXT_PUBLIC_CONTRACT_ADDRESS` in `app/.env.local`.
 ## Live deployment
 
 - Network: **GenLayer StudioNet** (chain id 61999)
-- Contract: `0xd72f403b40EB84BE4f8b5024BfA394BFa19E1c5a`
-- Deploy tx: `0x87e4bd47236b844f3eda0b67d51d9572a4508824aecea18e8f5e37bc518cf65c`
+- Contract: `0xf1443Af9A2c708E09BeA2EAbcD608502c016Dc2c`
+- Deploy tx: `0xce903a4d168c69220fa9b638a266ec58846060b6339cac2d360d1b0ed6a0b031`
 - Consensus on deploy: 5 validators, 5 AGREE
 - Runner: `py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`
-- Source sha256: `a74d5cbe354baa0e39b6c4e0a0984d6dd6b2b08cc7d7ccbd3dd4d20a2b2e5608`
+- Source sha256: `7db00c085cb9d6eaf443182b71c75436b594549e7f5a7396d175f7803e2ea9eb`
 
 The address is a claim until someone checks it, so the check ships with
 the repository:
 
 ```bash
-genlayer code 0xd72f403b40EB84BE4f8b5024BfA394BFa19E1c5a > onchain.py
+genlayer code 0xf1443Af9A2c708E09BeA2EAbcD608502c016Dc2c > onchain.py
 python scripts/verify_deployment.py onchain.py
-# MATCH   sha256 a74d5cbe354baa0e39b6c4e0a0984d6dd6b2b08cc7d7ccbd3dd4d20a2b2e5608
+# MATCH   sha256 7db00c085cb9d6eaf443182b71c75436b594549e7f5a7396d175f7803e2ea9eb
 ```
 
 That comparison was run against this deployment and matched.
@@ -284,8 +294,8 @@ That comparison was run against this deployment and matched.
 
 ```
 genvm-lint check      passes — 28 methods (10 view, 18 write)
-pytest tests/direct   101 passed
-gltest tests/integr.  5 passed on StudioNet, real panel  (6m32s)
+pytest tests/direct   104 passed
+gltest tests/integr.  6 passed on StudioNet, real panel  (9m30s)
 tsc --noEmit          clean
 next build            clean, 12 routes
 ```
@@ -307,9 +317,21 @@ decision fingerprints:
   the requirements it marked PASS. Escrow stayed held: a verdict is not
   a payout.
 - **unreachable evidence does not pass** — the same flow against a
-  domain that cannot resolve. The critical requirement came back
-  UNVERIFIABLE rather than PASS, and evidence quality graded down. The
-  panel refused to certify a source it could not read.
+  domain that cannot resolve. Both requirements came back exactly
+  `UNVERIFIABLE`, the verdict was `UNVERIFIABLE`, the score was 0, and
+  the escrow did not move. The test demands `UNVERIFIABLE` specifically
+  rather than accepting `FAIL` as well: tolerating either answer is
+  tolerating the ambiguity that splits validators.
+
+- **settlement moves real balances** — the whole arc, carried past the
+  verdict. Settling straight from `VERDICT` is refused; the appeal
+  window is ticked closed; `finalize_verdict` pins `final_verdict_id`;
+  then `settle` runs to **FINALIZED**, because payouts emit
+  `on="finalized"`. The panel returned VERIFIED / score 100, the
+  constitution maps that to FULL, and the agent's on-chain balance rose
+  by exactly the escrowed 2 GEN. The expected figure is derived
+  independently from the frozen weights and the panel's determinations,
+  so the test does not simply agree with whatever the contract computed.
 
 Plus three on-chain checks with no panel: the live protocol vocabulary,
 funding recording real custody and locking terms (refused with
@@ -346,13 +368,11 @@ Stated plainly rather than left implicit.
 - **Panel capture is out of scope.** A compromised validator majority can
   agree on a false verdict; that is GenLayer's trust model. The bounded
   appeal exists so a bad round can be contested once.
-- **Settlement is proven in the direct suite, not yet on a live panel.**
-  The live suite drives accept → evidence → deliver → dispute → freeze →
-  adjudicate through real consensus, and stops at the stored verdict.
-  Finalize and settle are covered by 101 direct tests but have not been
-  executed on chain, because advancing an appeal window means ticking a
-  hosted network forward and the payout arithmetic is deterministic
-  either way. The gap is small and named rather than papered over.
+- **The appeal path is proven in direct tests only.** `appeal` and a
+  second adjudication round are covered offline; the live suite settles
+  on a first-round verdict. Nothing about the appeal changes the payout
+  arithmetic — `final_verdict_id` pins which verdict pays either way —
+  but it has not been driven through a live panel twice.
 - **A live round depends on sources being reachable from every node.**
   Both panel tests passed on the first attempt, but a flaky source
   produces different inputs for different validators and can legitimately

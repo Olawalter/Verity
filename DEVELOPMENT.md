@@ -58,7 +58,7 @@ npm run dev          # http://localhost:3120
 
 ## 3. Testing
 
-### Direct suite — 101 tests, no network
+### Direct suite — 104 tests, no network
 
 ```bash
 pytest tests/direct/ -q            # ~30s
@@ -74,6 +74,11 @@ pytest tests/direct/test_settlement.py -v
 | `test_settlement.py` | policy mapping, critical override, appeals, recovery |
 | `test_equivalence.py` | what reaches consensus, and what the model cannot touch |
 
+CI runs the lint, the direct suite, the typecheck and the frontend build
+on every push (`.github/workflows/ci.yml`). The live suite is not in CI:
+it needs funded wallets and minutes per round, so it stays a deliberate
+local run.
+
 **What direct mode can and cannot prove.** It runs the contract in a
 real GenVM runner, but `mock_llm` answers the leader and every validator
 with the same canned response — so a direct test can never demonstrate
@@ -85,8 +90,15 @@ integration suite's job.
 
 ### Integration suite — a live network
 
-**Status: 5 passed against StudioNet, real panel, 6m32s.** Two of the
-five drive a full adjudication round through real consensus.
+**Status: 6 passed against StudioNet, real panel, 9m30s.** Three of the
+six drive a full adjudication round through real consensus, and one of
+those carries on to a finalized settlement and checks that GEN actually
+moved.
+
+Expect to run it more than once over time. Rounds depend on every node
+retrieving the same sources, and a source that is slow for one validator
+can legitimately break a round — see **When consensus fails** for how to
+tell that apart from a real defect.
 
 Needs two funded StudioNet accounts, so requester and agent are
 genuinely different wallets:
@@ -189,6 +201,35 @@ Redeploying and forgetting this step is the classic failure: the app
 keeps serving the old contract and every number on screen is quietly
 stale.
 
+### Hosting the frontend on Vercel
+
+Import the GitHub repo, then set exactly this:
+
+| Setting | Value |
+|---|---|
+| Root Directory | `app` |
+| Framework preset | Next.js (autodetected) |
+| Build command | default (`next build`) |
+| `NEXT_PUBLIC_CONTRACT_ADDRESS` | `0xf1443Af9A2c708E09BeA2EAbcD608502c016Dc2c` |
+| `NEXT_PUBLIC_DEPLOY_ENV` | `studionet` |
+
+Two failure modes, both previously paid for:
+
+- **"No python entrypoint found."** With Root Directory left at the repo
+  root, Vercel sees `contracts/*.py` and `requirements.txt` and tries to
+  build the repo as a Python project. Setting Root Directory to `app` is
+  the fix — not a root `vercel.json`.
+- **`ENOENT: /vercel/path0/app/app/package.json`.** A root `vercel.json`
+  pointing at `app/` *combined with* Root Directory already set to `app`
+  makes Vercel look for `app/app`. Use one or the other; this repo ships
+  no `vercel.json` at all, so the dashboard setting is the single source
+  of truth.
+
+Set the environment variables **before** the first deploy. A build with
+no `NEXT_PUBLIC_CONTRACT_ADDRESS` succeeds on purpose — the UI states the
+misconfiguration rather than inventing an address — so a missing variable
+shows up as a red banner on a live site, not as a failed build.
+
 ## 5. Debugging a failed transaction
 
 ```bash
@@ -226,18 +267,35 @@ The fix is always to make the rule *total*, never to weaken the
 fingerprint until disagreement becomes impossible. A total rule lands on
 exactly one answer for every input, **including silence**.
 
-This is why:
+The working rule, arrived at the hard way on this protocol:
 
-- `fraud_flags` is a closed vocabulary, validated in `_normalize_verdict`;
-- `evidence_quality` has a counting rule in the prompt (how many sources
-  returned `FETCH_SUCCESS`), not an aesthetic one;
-- `unverifiable_items` is derived by the contract from the results;
-- `reason_code` and `reasoning` are recorded but **excluded** from the
-  fingerprint, because they are labels and prose.
+> **Require agreement on everything that has a consequence, and only on
+> that.**
 
-If you add a field to the verdict, decide before you add it: is this a
-determination, or a description? Determinations go in the fingerprint
-and need a total rule. Descriptions stay out.
+So the fingerprint carries `job_id`, the verdict, each requirement's
+`(id, result)`, and `unverifiable_items` — and nothing else.
+`evidence_quality`, `fraud_flags`, `reason_code` and `reasoning` are
+recorded and displayed, but no code path reads them, so requiring
+independent nodes to agree on them can only lose rounds.
+
+`evidence_quality` is the cautionary tale. It had a genuinely total rule
+— count how many sources returned `FETCH_SUCCESS` — and it still broke
+rounds, because **retrieval itself differs between nodes**. One
+validator's fetch times out, its count differs by one, and the round dies
+over a field that could not have moved a payout. A total rule is
+necessary and not sufficient: the *input* has to be identical too.
+
+`FAIL` vs `UNVERIFIABLE` was the other gap. The prompt said unread
+evidence must never PASS but left the choice between the two open, and
+honest validators split on it. It now gives a total test: read something
+that contradicts the requirement → `FAIL`; could not read what you needed
+→ `UNVERIFIABLE`, and if every source for a requirement failed to return
+`FETCH_SUCCESS` it is always `UNVERIFIABLE`.
+
+If you add a field to the verdict, ask two questions before putting it in
+the fingerprint. Does anything *read* it? If not, keep it out. If yes,
+does it have a total rule over inputs that are identical on every node?
+If not, it will cost you rounds.
 
 ## 7. Changing the contract
 

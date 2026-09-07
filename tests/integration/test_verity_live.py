@@ -27,11 +27,14 @@ wording fails for a reason unrelated to correctness.
 """
 import json
 import os
+import time
 
 import pytest
+from genlayer_py.types.transactions import TransactionStatus
 
 from gltest import get_accounts, get_default_account
-from .conftest import must_fail, must_succeed, read as _read
+from .conftest import (balance_of, consensus_summary, must_fail,
+                       must_succeed, read as _read)
 
 GEN = 10 ** 18
 PAYMENT = 2 * GEN           # small: these are real balances on a shared net
@@ -244,12 +247,18 @@ def test_live_panel_reaches_consensus_on_retrievable_evidence(contract, agent):
         f"refused, but for an unexpected reason: {reason}"
 
     receipt = contract.adjudicate(args=[job_id]).transact(**ROUND_WAIT)
-    must_succeed(receipt, (
-        "adjudicate — a failure here is usually consensus failure, which "
-        "means a consensus-critical field is not mechanically derivable"))
+    must_succeed(receipt, "adjudicate")
 
+    # `must_succeed` reads the LEADER receipt, which says nothing about
+    # whether the validators agreed. A round that fails consensus still
+    # reports SUCCESS there while committing no state, so the real check
+    # is that the job actually moved and a verdict exists.
     job = _read(contract, "get_job", [job_id])
-    assert job["status"] == "VERDICT"
+    assert job["status"] == "VERDICT", (
+        f"round did not commit — status {job['status']}; "
+        f"{consensus_summary(receipt)}. A round that reaches the leader "
+        f"but not consensus means a field that must agree is not "
+        f"mechanically derivable")
 
     v = _read(contract, "get_verdict", [job_id, int(job["latest_verdict_id"])])
     assert v["verdict"] in ("VERIFIED", "PARTIAL", "FAILED", "UNVERIFIABLE")
@@ -314,19 +323,213 @@ def test_unreachable_evidence_does_not_pass(contract, agent):
     job = _read(contract, "get_job", [job_id])
     verdict_id = int(job["latest_verdict_id"])
     assert verdict_id > 0, (
-        f"adjudicate was accepted but stored no verdict — job status "
-        f"{job['status']}, tick {job['current_tick']}")
+        f"adjudicate was accepted but stored no verdict — status "
+        f"{job['status']}, tick {job['current_tick']}; "
+        f"{consensus_summary(receipt)}")
     v = _read(contract, "get_verdict", [job_id, verdict_id])
 
-    # The requirement that depended on the dead link must not PASS. It may
-    # be UNVERIFIABLE or FAIL — both are honest readings of a source that
-    # could not be read — but PASS would mean the panel accepted an
-    # assertion it never checked.
-    r1 = next(r for r in v["requirements"] if r["id"] == "R1")
-    assert r1["result"] in ("UNVERIFIABLE", "FAIL"), \
-        f"unreachable evidence must never PASS, got {r1['result']}"
-    assert v["evidence_quality"] in ("INSUFFICIENT", "LOW")
+    # Every source filed against these requirements failed to return
+    # FETCH_SUCCESS, and the prompt now makes that case total: unread is
+    # UNVERIFIABLE, never FAIL. Absence of proof is not proof of absence,
+    # and the two settle very differently — FAIL scores zero, while
+    # UNVERIFIABLE sends the job to human review with escrow untouched.
+    # Accepting either answer here, as this test first did, is tolerating
+    # exactly the ambiguity that splits validators.
+    for rid in ("R1", "R2"):
+        result = next(r for r in v["requirements"] if r["id"] == rid)["result"]
+        assert result == "UNVERIFIABLE", (
+            f"{rid} rested entirely on a source that could not be read; "
+            f"expected UNVERIFIABLE, got {result}")
 
-    if v["verdict"] == "UNVERIFIABLE":
-        assert v["unverifiable_items"], \
-            "an UNVERIFIABLE verdict names which requirements were unresolved"
+    assert v["verdict"] == "UNVERIFIABLE"
+    assert v["unverifiable_items"] == ["R1", "R2"], \
+        "the contract derives this from the results it was given"
+    assert int(v["score"]) == 0, "nothing was verified, so nothing scored"
+
+    # Escrow does not move on a record that cannot support a conclusion.
+    assert int(job["escrow_held"]) == PAYMENT
+
+
+# ═══ 4 · settlement, all the way to real balances ════════════════════════════
+
+def _expected_policy(verdict: dict) -> str:
+    """Derive the settlement policy the way the constitution says to.
+
+    Deliberately recomputed here from the FROZEN requirement set and the
+    panel's determinations, rather than read back from the contract. A
+    test that asks the contract what it decided and then agrees with it
+    proves nothing; this one works the answer out independently and
+    checks the contract arrived at the same place.
+    """
+    critical_ids = {r["id"] for r in REQUIREMENTS if r["critical"]}
+    results = {r["id"]: r["result"] for r in verdict["requirements"]}
+
+    # critical_policy is FAIL_JOB on these jobs: one failed critical
+    # requirement refunds the whole payment, whatever the score.
+    if any(results.get(rid) == "FAIL" for rid in critical_ids):
+        return "REFUND"
+    return {
+        "VERIFIED": "FULL",
+        "PARTIAL": "PROPORTIONAL",
+        "FAILED": "REFUND",
+        "UNVERIFIABLE": "HUMAN_REVIEW",
+    }[verdict["verdict"]]
+
+
+def _expected_payouts(verdict: dict) -> tuple:
+    policy = _expected_policy(verdict)
+    score = int(verdict["score"])
+    if policy == "FULL":
+        agent = PAYMENT
+    elif policy == "REFUND":
+        agent = 0
+    elif policy == "PROPORTIONAL":
+        agent = PAYMENT * score // 100
+    else:
+        return policy, None, None
+    return policy, agent, PAYMENT - agent
+
+
+def _await_balance(address, expected: int, attempts: int = 30, delay: int = 6) -> int:
+    """Wait for a finalized transfer to land.
+
+    Finalization is what releases the value, and a returned receipt does
+    not guarantee the node this test reads from has observed the new
+    balance yet. Polling to a known target beats sleeping for an
+    arbitrary interval and hoping.
+    """
+    current = balance_of(address)
+    for _ in range(attempts):
+        if current >= expected:
+            return current
+        time.sleep(delay)
+        current = balance_of(address)
+    return current
+
+
+@pytest.mark.skipif(
+    os.environ.get("VERITY_SKIP_PANEL", "0") == "1",
+    reason="set VERITY_SKIP_PANEL=1 to skip the slow live-panel rounds",
+)
+def test_settlement_moves_real_balances(contract, agent):
+    """The whole arc, ending in GEN actually moving.
+
+    A verdict is not a payout: the appeal window has to elapse and the
+    verdict has to be finalized before settlement is legal. This walks
+    that, then checks the chain's balances — not merely the contract's
+    own record of what it believes it paid.
+    """
+    job_id = _create_and_fund(contract, agent.address, "settle")
+    requester = get_default_account()
+
+    agent_contract = contract.connect(agent)
+    must_succeed(agent_contract.accept_job(args=[job_id, ""]).transact(),
+                 "accept_job")
+    for rid in ("R1", "R2"):
+        must_succeed(agent_contract.submit_evidence(args=[
+            job_id, rid, GOOD_URL, CLAIMED_HASH, "text/markdown",
+            "raw.githubusercontent.com", "genlayerlabs", "DELIVERABLE",
+            "UNKNOWN", "Published project document.",
+        ]).transact(), f"submit_evidence({rid})")
+    must_succeed(agent_contract.submit_deliverable(args=[
+        job_id, GOOD_URL, CLAIMED_HASH,
+    ]).transact(), "submit_deliverable")
+
+    must_succeed(contract.open_dispute(args=[
+        job_id, json.dumps(["R2"]),
+        "The document does not describe a software project.", "[]",
+    ]).transact(value=DISPUTE_BOND), "open_dispute")
+    must_succeed(contract.freeze_evidence(args=[job_id]).transact(),
+                 "freeze_evidence")
+    must_succeed(contract.adjudicate(args=[job_id]).transact(**ROUND_WAIT),
+                 "adjudicate")
+
+    job = _read(contract, "get_job", [job_id])
+    assert job["status"] == "VERDICT"
+    verdict = _read(contract, "get_verdict", [job_id, int(job["latest_verdict_id"])])
+    policy, expect_agent, expect_requester = _expected_payouts(verdict)
+    print(f"  panel returned {verdict['verdict']} score={verdict['score']} "
+          f"-> policy {policy}")
+
+    # A verdict is not spendable. Settlement must be refused until the
+    # appeal window has actually elapsed.
+    reason = must_fail(contract.settle(args=[job_id]).transact(),
+                       "settle straight from VERDICT")
+    assert "illegal transition from VERDICT" in reason, \
+        f"refused, but for an unexpected reason: {reason}"
+
+    # Age the protocol clock past the appeal window. `tick` is
+    # permissionless by design — a deadline nobody can reach is not a
+    # deadline.
+    for _ in range(8):
+        job = _read(contract, "get_job", [job_id])
+        if int(job["current_tick"]) >= int(job["appeal_deadline_tick"]):
+            break
+        must_succeed(contract.tick(args=[]).transact(), "tick")
+    else:
+        raise AssertionError(
+            f"appeal window never closed: tick {job['current_tick']}, "
+            f"deadline {job['appeal_deadline_tick']}")
+
+    must_succeed(contract.finalize_verdict(args=[job_id]).transact(),
+                 "finalize_verdict")
+    job = _read(contract, "get_job", [job_id])
+    assert job["status"] == "FINALIZED"
+    assert int(job["final_verdict_id"]) == int(job["latest_verdict_id"]), \
+        "settlement must be pinned to a specific verdict"
+
+    if policy == "HUMAN_REVIEW":
+        # A record that cannot support a conclusion does not get a
+        # guessed split. Escrow stays put until it is recovered.
+        reason = must_fail(contract.settle(args=[job_id]).transact(),
+                           "settle under HUMAN_REVIEW")
+        assert "HUMAN_REVIEW" in reason, f"unexpected reason: {reason}"
+        must_succeed(contract.recover_escrow(args=[job_id]).transact(),
+                     "recover_escrow")
+        job = _read(contract, "get_job", [job_id])
+        assert job["status"] == "REFUNDED"
+        assert int(job["escrow_held"]) == 0, "no permanent escrow lock"
+        return
+
+    agent_before = balance_of(agent.address)
+    requester_before = balance_of(requester.address)
+
+    # Payouts emit `on="finalized"`, so ACCEPTED is not far enough: the
+    # transfer executes when the settle transaction finalizes.
+    must_succeed(
+        contract.settle(args=[job_id]).transact(
+            wait_transaction_status=TransactionStatus.FINALIZED,
+            wait_interval=5000, wait_retries=180),
+        "settle")
+
+    job = _read(contract, "get_job", [job_id])
+    assert job["status"] == "SETTLED"
+    assert int(job["escrow_held"]) == 0
+
+    s = _read(contract, "get_settlement", [job_id])
+    assert s["policy_applied"] == policy, (
+        f"contract applied {s['policy_applied']}, constitution says {policy}")
+    assert int(s["agent_payout"]) == expect_agent
+    assert int(s["requester_payout"]) == expect_requester
+    assert int(s["agent_payout"]) + int(s["requester_payout"]) == PAYMENT
+    assert int(s["escrow_after"]) == 0
+
+    # And the money actually moved. The agent sends no transaction here,
+    # so its balance change is the payout with nothing subtracted for
+    # gas — the cleanest available evidence that GEN really left escrow.
+    if expect_agent > 0:
+        agent_after = _await_balance(agent.address, agent_before + expect_agent)
+        assert agent_after - agent_before == expect_agent, (
+            f"agent balance moved {agent_after - agent_before}, "
+            f"expected {expect_agent}")
+
+    # The requester pays gas for its own transactions, so only the
+    # direction is assertable there.
+    if expect_requester > 0:
+        requester_after = _await_balance(
+            requester.address, requester_before + expect_requester // 2)
+        assert requester_after > requester_before, \
+            "requester did not receive its share"
+
+    print(f"  settled {policy}: agent +{expect_agent / 10**18} GEN, "
+          f"requester +{expect_requester / 10**18} GEN")

@@ -191,3 +191,81 @@ def test_requirement_order_does_not_change_the_outcome(
 
     assert [r["id"] for r in v["requirements"]] == sorted(ALL_IDS)
     assert v["score"] == 80
+
+
+# ═══ recorded, but consequence-free ══════════════════════════════════════════
+#
+# `evidence_quality` and `fraud_flags` were removed from the decision
+# fingerprint after live rounds failed on them. The justification is
+# below and it is testable: neither field can change a payout by a
+# single wei, so demanding that independent validators agree on them
+# buys nothing and loses rounds — `evidence_quality` in particular
+# summarises RETRIEVAL, which legitimately differs between nodes.
+
+def test_evidence_quality_has_no_effect_on_settlement(
+    direct_vm, deployed, direct_alice, frozen
+):
+    """A LOW-quality record and a HIGH-quality one settle identically
+    when the determinations match."""
+    results = dict(ALL_PASS)
+    results["R4"] = "FAIL"
+    results["R5"] = "FAIL"                        # score 80 either way
+
+    _adjudicate(direct_vm, deployed, direct_alice, frozen, results,
+                evidence_quality="LOW")
+    for _ in range(4):
+        deployed.tick()
+    deployed.finalize_verdict(frozen)
+    deployed.settle(frozen)
+
+    s = deployed.get_settlement(frozen)
+    assert s["policy_applied"] == "PROPORTIONAL"
+    assert s["agent_payout"] == PAYMENT * 80 // 100
+    assert s["score"] == 80
+
+
+def test_fraud_flags_have_no_effect_on_settlement(
+    direct_vm, deployed, direct_alice, frozen
+):
+    """Flagging fraud records the concern; it does not redirect money.
+
+    Acting on a flag would need criteria the protocol does not have —
+    and a field that cannot move a payout does not need to survive
+    consensus.
+    """
+    results = dict(ALL_PASS)
+    results["R4"] = "FAIL"
+    results["R5"] = "FAIL"
+
+    _adjudicate(direct_vm, deployed, direct_alice, frozen, results,
+                fraud_flags=["FABRICATED_EVIDENCE",
+                             "SOURCE_CONTRADICTS_CLAIM"])
+    for _ in range(4):
+        deployed.tick()
+    deployed.finalize_verdict(frozen)
+    deployed.settle(frozen)
+
+    v = deployed.get_verdict(frozen, 1)
+    assert v["fraud_flags"] == ["FABRICATED_EVIDENCE",
+                                "SOURCE_CONTRADICTS_CLAIM"], "flags are recorded"
+
+    s = deployed.get_settlement(frozen)
+    assert s["agent_payout"] == PAYMENT * 80 // 100, "and change nothing"
+    assert s["agent_payout"] + s["requester_payout"] == PAYMENT
+
+
+def test_only_results_drive_the_score(direct_vm, deployed, direct_alice, frozen):
+    """The whole justification in one assertion: swap every descriptive
+    field, keep the determinations, and the money is identical."""
+    results = dict(ALL_PASS)
+    results["R3"] = "FAIL"                        # score 80
+
+    _adjudicate(direct_vm, deployed, direct_alice, frozen, results,
+                evidence_quality="INSUFFICIENT",
+                fraud_flags=["FALSE_INDEPENDENCE_CLAIM"],
+                reasoning="A wholly different account of the same facts.")
+
+    v = deployed.get_verdict(frozen, 1)
+    assert v["score"] == 80
+    assert v["verdict"] == "PARTIAL"
+    assert v["critical_failed"] is False

@@ -221,8 +221,29 @@ def revert_reason(receipt) -> str:
     return " | ".join(parts)
 
 
+def consensus_summary(receipt) -> str:
+    """Whatever the receipt says about how the panel voted."""
+    data = receipt.get("consensus_data") or {}
+    votes = data.get("validator_votes_name") or data.get("validator_votes")
+    status = receipt.get("status_name") or receipt.get("status")
+    bits = []
+    if status:
+        bits.append(f"status={status}")
+    if votes:
+        bits.append(f"votes={votes}")
+    return ", ".join(bits) or "no consensus data on receipt"
+
+
 def must_succeed(receipt, what: str):
-    """Assert a write landed, and say why it did not when it failed."""
+    """Assert a write landed, and say why it did not when it failed.
+
+    Note the limit of this check for a NONDET round: `tx_execution_succeeded`
+    inspects the LEADER's receipt only. A round where the leader executed
+    fine but the validators did not agree still reports SUCCESS here
+    while committing no state at all — which surfaces later as
+    "accepted but stored no verdict". Tests that run a round must
+    therefore assert the resulting STATE, not just this.
+    """
     assert tx_execution_succeeded(receipt), f"{what} failed — {revert_reason(receipt)}"
     return receipt
 
@@ -232,6 +253,12 @@ def must_fail(receipt, what: str):
     assert not tx_execution_succeeded(receipt), (
         f"{what} was expected to be refused but succeeded")
     return revert_reason(receipt)
+
+
+def balance_of(address: str) -> int:
+    """Real GEN held by an address, straight from the chain."""
+    out = rpc("eth_getBalance", [str(address), "latest"])
+    return int(out["result"], 16)
 
 
 def read(contract, view: str, args: list):

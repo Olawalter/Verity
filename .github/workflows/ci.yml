@@ -1,0 +1,70 @@
+name: CI
+
+# Everything here runs offline. The live suite needs funded wallets and
+# takes minutes per adjudication round, so it stays a deliberate local
+# run (see DEVELOPMENT.md) rather than something that burns a shared
+# network on every push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Contract — lint and direct tests
+    runs-on: ubuntu-latest
+    env:
+      # The contract carries §, — and box drawing in its comments. The
+      # linter reads files with the system codec, which is UTF-8 on this
+      # runner and cp1252 on Windows; setting it explicitly means CI
+      # fails for the same reasons a developer's machine does.
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install pinned tooling
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        run: genvm-lint check contracts/verity.py
+
+      - name: Direct tests
+        run: pytest tests/direct/ -q
+
+  app:
+    name: Frontend — typecheck and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        # A missing contract address must produce a stated error in the
+        # UI, never a fabricated default, so the build is exercised
+        # WITHOUT one. Supplying a fake address here would hide exactly
+        # the failure mode this check is for.
+        run: npm run build
