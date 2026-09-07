@@ -21,6 +21,29 @@ Versions in `requirements.txt` are pinned to what this repository was
 built and tested against. The direct-mode API has changed shape between
 releases; if you unpin, expect to fix fixtures.
 
+**On a fresh clone, seed the runner bundle first.**
+
+```bash
+python scripts/fetch_genvm_bundle.py
+```
+
+Neither `genvm-lint` nor `gltest` direct mode can run without the ~128 MB
+GenVM runner bundle, and on a cold cache fetching it does not currently
+work by itself. `gltest` 0.29.2 asks GitHub for
+`<release>/genvm-universal.tar.xz`; the v0.3.0-rc line renamed that asset
+to `genvm-runners-all.tar.xz`, so the request 404s and every direct test
+errors at import. (`genvm-linter` 0.11.0 already tries both names.)
+
+Both tools also treat "the file exists" as "the file is good", so an
+interrupted download leaves a truncated tarball that fails with
+`Compressed file ended before the end-of-stream marker` on every later
+run until you delete it by hand. The script verifies the archive before
+installing it and moves it into place atomically, so a cache entry is
+either absent or complete.
+
+It is idempotent, and CI runs it too — that failure is exactly what took
+the first CI run down.
+
 **One environment note that will cost you an afternoon.** If a package
 named `genvm-sdk-python` is installed, every direct test fails at import
 with `name 'allow_storage' is not defined`. It ships a `genlayer`

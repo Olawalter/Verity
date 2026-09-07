@@ -24,6 +24,10 @@ jobs:
       # runner and cp1252 on Windows; setting it explicitly means CI
       # fails for the same reasons a developer's machine does.
       PYTHONUTF8: "1"
+      # Pinned rather than "latest": the bundle must contain the runner
+      # hash named in the contract's Depends header, and a suite whose
+      # runtime changes underneath it is not a suite.
+      GENVM_VERSION: "v0.3.0-rc7"
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +38,24 @@ jobs:
 
       - name: Install pinned tooling
         run: pip install -r requirements.txt
+
+      # The runner bundle is ~128 MB and neither tool can work without
+      # it. Cached on the pinned version, so it is fetched once rather
+      # than on every push.
+      - name: Cache GenVM runner bundle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/genvm-linter
+            ~/.cache/gltest-direct
+          key: genvm-${{ env.GENVM_VERSION }}-${{ runner.os }}
+
+      # gltest 0.29.2 asks for an asset name the v0.3.0-rc line renamed,
+      # so on a cold cache it 404s and every direct test errors at
+      # import. This fetches the asset that exists and installs it under
+      # the name both tools look for. See the script for the full story.
+      - name: Seed the GenVM runner bundle
+        run: python scripts/fetch_genvm_bundle.py
 
       - name: Lint
         run: genvm-lint check contracts/verity.py
